@@ -1,0 +1,75 @@
+name: windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.5'
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      # Здесь же проверяются DPAPI и пометка zip-записей как Unix на настоящей Windows.
+      - run: flutter test
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+          }
+      - run: powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+      - name: Test real signing toolchain
+        shell: pwsh
+        run: |
+          $env:APPVAULT_TEST_TOOLS = Join-Path $PWD 'build\windows\x64\runner\Release\tools'
+          flutter test test/toolchain_test.dart
+          if ($LASTEXITCODE -ne 0) { throw 'Real toolchain tests failed' }
+      - name: Test Windows installer
+        run: powershell -ExecutionPolicy Bypass -File scripts/test_installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AppVault-windows
+          if-no-files-found: error
+          path: |
+            dist/AppVault-Setup.exe
+            dist/AppVault-windows.zip
+            dist/SHA256SUMS.txt
+      - name: Upload installer test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-test-logs
+          path: ${{ runner.temp }}/AppVault install test-*/*.log
+          if-no-files-found: ignore
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: AppVault-windows
+          path: dist
+      - name: Attach downloads to published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/AppVault-Setup.exe dist/AppVault-windows.zip dist/SHA256SUMS.txt --clobber
